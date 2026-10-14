@@ -20,7 +20,7 @@ from pypdf import PdfReader
 
 # You can change the model without touching code: set GEMINI_MODEL in
 # Streamlit secrets or as an environment variable.
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.8-flash"
 MAX_RESUME_CHARS = 20_000
 MAX_JD_CHARS = 8_000
 
