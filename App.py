@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import time
 
 import streamlit as st
 from docx import Document
@@ -23,6 +24,10 @@ from pypdf import PdfReader
 DEFAULT_MODEL = "gemini-3.8-flash"
 MAX_RESUME_CHARS = 20_000
 MAX_JD_CHARS = 8_000
+
+# Temporary Gemini errors (overloaded / rate limited) are retried with a pause.
+RETRYABLE_CODES = {429, 500, 503, 504}
+RETRY_DELAYS = [3, 8, 15]  # seconds to wait before retry 1, 2, 3
 
 CATEGORY_KEYS = [
     "keywords",
@@ -216,17 +221,31 @@ def get_model_name() -> str:
     return os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)
 
 
-def analyze_resume(api_key: str, resume_text: str, job_description: str = "") -> dict:
+def analyze_resume(api_key: str, resume_text: str, job_description: str = "", on_retry=None) -> dict:
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=get_model_name(),
-        contents=build_prompt(resume_text, job_description),
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-        ),
+    prompt = build_prompt(resume_text, job_description)
+    config = types.GenerateContentConfig(
+        temperature=0.2,
+        response_mime_type="application/json",
     )
-    return parse_response(response.text)
+
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            response = client.models.generate_content(
+                model=get_model_name(),
+                contents=prompt,
+                config=config,
+            )
+            return parse_response(response.text)
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code in RETRYABLE_CODES and attempt < len(RETRY_DELAYS):
+                delay = RETRY_DELAYS[attempt]
+                if on_retry:
+                    on_retry(attempt + 1, delay)
+                time.sleep(delay)
+                continue
+            raise
 
 
 # --------------------------------------------------------------------------
@@ -328,13 +347,28 @@ def main() -> None:
             return
 
         try:
+            status = st.empty()
+
+            def notify(attempt, delay):
+                status.info(
+                    f"Gemini is busy right now. Retrying in {delay}s "
+                    f"(attempt {attempt} of {len(RETRY_DELAYS)})..."
+                )
+
             with st.spinner("Analyzing with Gemini..."):
-                result = analyze_resume(api_key, text, job_description)
+                result = analyze_resume(api_key, text, job_description, on_retry=notify)
+            status.empty()
         except ValueError as exc:
             st.error(f"The AI response could not be understood: {exc}. Please try again.")
             return
         except Exception as exc:
-            st.error(f"Gemini request failed: {exc}")
+            if getattr(exc, "code", None) in RETRYABLE_CODES:
+                st.error(
+                    "Gemini is overloaded right now and didn't recover after "
+                    "several retries. Please wait a minute and click Analyze again."
+                )
+            else:
+                st.error(f"Gemini request failed: {exc}")
             return
 
         render_results(result)
